@@ -587,6 +587,44 @@ class TestMixedAdapterTypes(unittest.TestCase):
         assert torch.isfinite(output_unloaded).all()
         assert torch.allclose(output_base, output_unloaded, atol=atol, rtol=rtol)
 
+    def test_disable_adapter_restores_nested_and_predisabled_state(self):
+        # disable_adapter() must restore the state that was present when the context was entered, not
+        # unconditionally re-enable the adapters. Otherwise a nested inner context re-enables the adapters
+        # while an outer context is still active, and entering the context on an already-disabled model
+        # leaves the adapters enabled on exit. See https://github.com/huggingface/peft/issues/3507
+        atol = 1e-5
+        rtol = 1e-5
+        torch.manual_seed(0)
+
+        model = SimpleNet().eval().to(self.torch_device)
+        input = torch.arange(90).reshape(9, 10).to(self.torch_device)
+
+        config = LoraConfig(r=4, lora_alpha=4, target_modules=["lin0", "lin1"], init_lora_weights=False)
+        peft_model = get_peft_model(model, config, "adapter0", mixed=True)
+
+        output_adapter = peft_model(input)
+        with peft_model.disable_adapter():
+            output_base = peft_model(input)
+        assert not torch.allclose(output_adapter, output_base, atol=atol, rtol=rtol)
+
+        # nested contexts: leaving the inner context must not re-enable the adapters while the outer
+        # context is still active, and the adapters must be restored once the outer context exits.
+        with peft_model.disable_adapter():
+            with peft_model.disable_adapter():
+                output_inner = peft_model(input)
+            output_after_inner = peft_model(input)
+        output_after_outer = peft_model(input)
+
+        assert torch.allclose(output_inner, output_base, atol=atol, rtol=rtol)
+        assert torch.allclose(output_after_inner, output_base, atol=atol, rtol=rtol)
+        assert torch.allclose(output_after_outer, output_adapter, atol=atol, rtol=rtol)
+
+        # entering the context on an already-disabled model must leave it disabled on exit.
+        peft_model.base_model.disable_adapter_layers()
+        with peft_model.disable_adapter():
+            pass
+        assert torch.allclose(peft_model(input), output_base, atol=atol, rtol=rtol)
+
     def test_delete_adapter(self):
         atol = 1e-5
         rtol = 1e-5

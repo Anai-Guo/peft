@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import contextmanager
 from typing import Any, Optional, Union
 
@@ -194,11 +195,23 @@ class PeftMixedModel(PushToHubMixin, torch.nn.Module):
         """
         Disables the adapter module.
         """
+        # Snapshot whether the adapters are currently enabled so their previous state can be restored on exit. This
+        # mirrors ``PeftModel.disable_adapter`` and keeps nested contexts (and models that were already disabled before
+        # entering) consistent: without it the ``finally`` block would unconditionally re-enable the adapters, wrongly
+        # turning them back on when an outer context or an explicit ``disable_adapter_layers()`` had disabled them.
+        adapter_states = [module.disable_adapters for module in self.modules() if hasattr(module, "disable_adapters")]
+        was_disabled = all(adapter_states) if adapter_states else True
+        if adapter_states and any(adapter_states) and not all(adapter_states):
+            warnings.warn(
+                "The model contains some adapter layers that are enabled and others that are disabled. This is most "
+                "likely unintentional. After exiting the disable_adapter context, all adapters will be enabled"
+            )
         try:
             self.base_model.disable_adapter_layers()
             yield
         finally:
-            self.base_model.enable_adapter_layers()
+            if not was_disabled:
+                self.base_model.enable_adapter_layers()
 
     def add_adapter(
         self,
